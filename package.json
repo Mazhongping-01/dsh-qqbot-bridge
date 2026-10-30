@@ -50,7 +50,8 @@
     "probe:session-list": "tsx scripts/probe-session-list.ts",
     "probe:e3": "tsx scripts/probe-e3-length.ts",
     "probe:first-message": "tsx scripts/probe-first-message.ts",
-    "build:client": "tsx scripts/build-client.ts"
+    "build:client": "tsx scripts/build-client.ts",
+    "prepare": "pnpm build"
   },
   "repository": {
     "type": "git",
