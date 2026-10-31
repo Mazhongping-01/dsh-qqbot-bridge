@@ -129,6 +129,16 @@ export interface QqSendMessagePayload {
    * 流式占用的那一格不能再被普通消息使用）→ 必须经 per-msg_id 槽位分配器取用。
    */
   msg_seq?: number;
+  /**
+   * 消息召回标记。
+   *
+   * 【文档明写】QQ 官方《发送单聊消息》《流式发送单聊消息》：`is_wakeup` 为 `true` 时
+   * **不校验 `msg_id` / `event_id` 的有效期**。
+   *
+   * 用途：被动回复锚点已过期、但内容仍需送达时（例如 `dsh-speak-up` 主动搭话所在的回合，
+   * 其锚点来自上一次入站消息），带此标记重发可绕过有效期校验，避免整条回复被 QQ 拒收。
+   */
+  is_wakeup?: boolean;
 }
 
 /**

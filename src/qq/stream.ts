@@ -37,6 +37,19 @@ export const QQ_STREAM_INPUT_STATE_FINISHED = 10;
 const EMPTY_USED: ReadonlySet<number> = new Set<number>();
 
 /**
+ * 判断一次发送失败是否属于「被动回复锚点失效」。
+ *
+ * 【实测】锚点 `msg_id` 过期/无效时 QQ 返回 `40034024 请求参数msg_id无效或越权`。
+ * 只有这一类错误才值得走兜底重发；其它错误必须原样上报，不能被兜底掩盖。
+ */
+function isAnchorExpiredError(result: QqApiResult): boolean {
+  if (result.ok) return false;
+  if (result.code !== undefined && String(result.code) === '40034024') return true;
+  const text = String(result.message ?? '');
+  return text.includes('msg_id') && (text.includes('无效') || text.includes('越权'));
+}
+
+/**
  * per-`msg_id` 的 `msg_seq` 槽位分配器（风险 **R9**，设计文档 §7.5）。
  * 【实测 E2-2】`(msg_id, msg_seq)` 唯一：流式占一格后，同 `msg_id` 的普通消息必须取新格，
  * 否则 `40054005 消息被去重`。`{ msgId → Set<usedSeq> }`，取最小空闲格。
@@ -503,10 +516,46 @@ export class QqStreamManager implements StreamManager {
           ...(seq !== undefined ? { msg_seq: seq } : {}),
         };
         result = await this.client.sendMessage(target.openid, outgoing);
+        // 锚点过期的兜底（详见 sendWithWakeupFallback）：只在「msg_id 失效」时触发
+        if (!result.ok && isAnchorExpiredError(result) && outgoing.msg_id !== undefined) {
+          result = await this.sendWithWakeupFallback(target.openid, outgoing);
+        }
         if (!result.ok) return result; // 任一条失败即停，如实返回失败码（绝不静默吞掉）
       }
       return result;
     });
+  }
+
+  /**
+   * 被动回复锚点已经失效时的兜底发送。
+   *
+   * 真机现象（`dsh-speak-up` 主动搭话）：该回合不是 QQ 投喂的，但桥接的 `turnOrigin`
+   * 仍保留上一次 `'qq'` 的取值（来源过滤对非 `'user'` 的 `source.kind` 直接 return，
+   * 不更新归属）→ 出站路由照发；而锚点 `msg_id` 早已超过被动回复有效期 → QQ 返回
+   * `40034024 请求参数msg_id无效或越权`，插件只记一条 warn，用户什么都收不到。
+   *
+   * 兜底顺序：
+   *   1. 带 `is_wakeup: true` 重发——【文档明写】该标记为真时不校验 `msg_id` 有效期；
+   *   2. 仍然失败则退化为主动消息（去掉 `msg_id`/`msg_seq`），保证内容至少能送达。
+   *
+   * 仅对「锚点失效」这一类错误触发，其它错误原样返回，避免掩盖真实问题。
+   */
+  private async sendWithWakeupFallback(
+    openid: string,
+    payload: QqSendMessagePayload
+  ): Promise<QqApiResult> {
+    const wakeup = await this.client.sendMessage(openid, { ...payload, is_wakeup: true });
+    if (wakeup.ok) {
+      this.logger.warn('[qq-stream] 被动回复锚点失效，已用 is_wakeup 重发成功');
+      return wakeup;
+    }
+    if (!isAnchorExpiredError(wakeup)) return wakeup;
+
+    const { msg_id: _msgId, msg_seq: _msgSeq, ...active } = payload;
+    this.logger.warn(
+      '[qq-stream] 锚点失效且 is_wakeup 无效，降级为主动消息（已移除 msg_id，可能计入主动消息额度）'
+    );
+    return this.client.sendMessage(openid, active);
   }
 
   private async endActive(openid: string): Promise<void> {

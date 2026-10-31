@@ -481,6 +481,63 @@ describe('qq/stream · StreamManager 行为', () => {
     expect(sent.content).toBeUndefined();
   });
 
+  // ───────── 锚点过期兜底（dsh-speak-up 主动搭话收不到回复的真机根因） ─────────
+
+  const EXPIRED: QqApiResult = {
+    ok: false,
+    status: 400,
+    code: 40034024,
+    message: '请求参数msg_id无效或越权',
+    body: null,
+  };
+
+  it('锚点失效（40034024）时带 is_wakeup 重发一次', async () => {
+    const h = makeHarness({ throttleMs: 0 });
+    h.client.sendHandler = (payload) =>
+      payload.is_wakeup === true ? { ok: true, status: 200, body: { id: 'ok' } } : EXPIRED;
+
+    const res = await h.manager.sendSerialized(h.target, { msg_type: 0, content: '主动搭话' });
+
+    expect(res.ok).toBe(true);
+    expect(h.client.sendCalls).toHaveLength(2);
+    expect(h.client.sendCalls[0].payload.is_wakeup).toBeUndefined();
+    expect(h.client.sendCalls[1].payload.is_wakeup).toBe(true);
+    // 仍然沿用原锚点，而不是直接放弃
+    expect(h.client.sendCalls[1].payload.msg_id).toBe('msg-1');
+  });
+
+  it('is_wakeup 也救不回来时降级为主动消息（移除 msg_id/msg_seq）', async () => {
+    const h = makeHarness({ throttleMs: 0 });
+    h.client.sendHandler = (payload) =>
+      payload.msg_id === undefined ? { ok: true, status: 200, body: { id: 'active' } } : EXPIRED;
+
+    const res = await h.manager.sendSerialized(h.target, { msg_type: 0, content: '主动搭话' });
+
+    expect(res.ok).toBe(true);
+    expect(h.client.sendCalls).toHaveLength(3);
+    const active = h.client.sendCalls[2].payload;
+    expect(active.msg_id).toBeUndefined();
+    expect(active.msg_seq).toBeUndefined();
+    expect(active.content).toBe('主动搭话');
+  });
+
+  it('其它错误码不触发兜底（避免掩盖真实问题）', async () => {
+    const h = makeHarness({ throttleMs: 0 });
+    h.client.sendHandler = () => ({
+      ok: false,
+      status: 403,
+      code: 11244,
+      message: '无权限调用该接口',
+      body: null,
+    });
+
+    const res = await h.manager.sendSerialized(h.target, { msg_type: 0, content: '回执' });
+
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe(11244);
+    expect(h.client.sendCalls).toHaveLength(1); // 只发了一次，没有兜底重发
+  });
+
   it('msg_type=0 纯文本回执不被改写', async () => {
     const h = makeHarness({ throttleMs: 0 });
     await h.manager.sendSerialized(h.target, { msg_type: 0, content: '纯文本 # 保留' });
